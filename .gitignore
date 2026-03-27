@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.pyc
+
+# PyInstaller
+build/
+dist/
+*.spec
+
+# Virtual env
+venv/
+
+# OS / editor junk
+.DS_Store
+Thumbs.db
+.vscode/
+
+# Secrets
+*.key
+*.pem
+*.pfx
+
+# App generated files
+resources/*.json
+resources/*.png
