@@ -1,7 +1,7 @@
-# --- SOD/EOD REPORT GENERATOR ---
+    # --- SOD/EOD REPORT GENERATOR ---
 #
 # Author: Allen Paul Olguera (with Gemini)
-# Last Updated: 2026-02-06
+# Last Updated: 2026-04-06
 #
 # --- KEY FEATURES ---
 # 1.  SOD Tab:
@@ -49,6 +49,8 @@ except Exception:
 # Base window depends on whether ttkbootstrap is available
 BaseWindow = tb.Window if tb else tk.Tk
 import os
+import sys
+import shutil
 import datetime
 import json
 import re
@@ -67,7 +69,7 @@ except Exception:
     parse_version = None
 
 try:
-    from PIL import ImageGrab, Image
+    from PIL import ImageGrab, Image, ImageDraw, ImageTk
 except ImportError:
     messagebox.showerror(
         "Missing Library",
@@ -75,12 +77,85 @@ except ImportError:
     )
     raise SystemExit
 
+# Prefer the Windows/system certificate store when available. This helps
+# PyInstaller builds in company environments where browsers work but the
+# bundled Python SSL trust store does not.
+try:
+    import pip_system_certs.wrapt_requests as _psc_wrapt_requests
+    _psc_wrapt_requests.inject_truststore()
+except Exception:
+    try:
+        import truststore
+        truststore.inject_into_ssl()
+    except Exception:
+        pass
+
 
 # --- CONFIGURATION ---
-APP_NAME = 'Prod_task_generator'
-APP_VERSION = '2026.03.27'
-HARDCODED_UPDATE_MANIFEST_URL = 'https://api.github.com/repos/mrallen29/iqvia-daily-task-generator/releases/latest'
-RESOURCES_DIR = 'resources'
+APP_NAME = 'SOD-EOD Report Generator'
+APP_VERSION = '2026.04.06'
+APP_DATA_DIR_NAME = 'Prod tasks tool'
+DEFAULT_UPDATE_MANIFEST_URL = 'https://api.github.com/repos/mrallen29/iqvia-daily-task-generator/releases/latest'
+
+def coerce_update_manifest_url(manifest_url: str) -> str:
+    """Normalize user-supplied GitHub repo/release URLs into the GitHub latest-release API URL."""
+    url = str(manifest_url or '').strip()
+    if not url:
+        return DEFAULT_UPDATE_MANIFEST_URL
+    match = re.match(r'^https?://github\.com/([^/]+)/([^/#?]+)(?:/.*)?$', url, flags=re.IGNORECASE)
+    if match:
+        owner = str(match.group(1) or '').strip()
+        repo = str(match.group(2) or '').strip()
+        if repo.endswith('.git'):
+            repo = repo[:-4]
+        if owner and repo:
+            return f'https://api.github.com/repos/{owner}/{repo}/releases/latest'
+    return url
+
+def get_persistent_app_dir() -> str:
+    """Return a stable writable per-user folder for config/presets/history."""
+    base_dir = ''
+    if os.name == 'nt':
+        base_dir = str(os.environ.get('APPDATA') or os.environ.get('LOCALAPPDATA') or '').strip()
+    else:
+        base_dir = str(os.environ.get('XDG_CONFIG_HOME') or '').strip()
+        if not base_dir:
+            home_dir = os.path.expanduser('~')
+            base_dir = os.path.join(home_dir, '.config') if home_dir else ''
+    if not base_dir:
+        base_dir = os.path.expanduser('~') or os.getcwd()
+    return os.path.join(base_dir, APP_DATA_DIR_NAME)
+
+def get_legacy_resource_dirs():
+    """Legacy resource locations used before AppData mode (best-effort migration)."""
+    candidates = []
+    try:
+        candidates.append(os.path.join(os.getcwd(), 'resources'))
+    except Exception:
+        pass
+    try:
+        candidates.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'resources'))
+    except Exception:
+        pass
+    try:
+        candidates.append(os.path.join(os.path.dirname(os.path.abspath(sys.executable)), 'resources'))
+    except Exception:
+        pass
+    deduped = []
+    seen = set()
+    for path_value in candidates:
+        try:
+            normalized = os.path.normcase(os.path.abspath(path_value))
+        except Exception:
+            normalized = str(path_value)
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        deduped.append(path_value)
+    return deduped
+
+APP_DATA_DIR = get_persistent_app_dir()
+RESOURCES_DIR = os.path.join(APP_DATA_DIR, 'resources')
 CONFIG_FILE = os.path.join(RESOURCES_DIR, 'config.json')
 PRESETS_FILE = os.path.join(RESOURCES_DIR, 'presets.json')
 TEMP_SCREENSHOT_PATH = os.path.join(RESOURCES_DIR, 'temp_screenshot.png')
@@ -88,6 +163,41 @@ TEMP_SCREENSHOT_PATH = os.path.join(RESOURCES_DIR, 'temp_screenshot.png')
 # OT data files
 OT_IN_FILE_PREFIX = os.path.join(RESOURCES_DIR, 'ot_in_')
 OT_OUT_FILE_PREFIX = os.path.join(RESOURCES_DIR, 'ot_out_')
+
+def migrate_legacy_resources_to_appdata():
+    """One-time migration from old relative ./resources folders into AppData."""
+    try:
+        os.makedirs(RESOURCES_DIR, exist_ok=True)
+    except Exception:
+        return
+    try:
+        if os.path.exists(CONFIG_FILE) or os.path.exists(PRESETS_FILE):
+            return
+    except Exception:
+        pass
+    for legacy_dir in get_legacy_resource_dirs():
+        try:
+            if not legacy_dir or not os.path.isdir(legacy_dir):
+                continue
+            if os.path.normcase(os.path.abspath(legacy_dir)) == os.path.normcase(os.path.abspath(RESOURCES_DIR)):
+                continue
+        except Exception:
+            continue
+        copied_any = False
+        try:
+            for filename in os.listdir(legacy_dir):
+                src_path = os.path.join(legacy_dir, filename)
+                dst_path = os.path.join(RESOURCES_DIR, filename)
+                if not os.path.isfile(src_path):
+                    continue
+                if os.path.exists(dst_path):
+                    continue
+                shutil.copy2(src_path, dst_path)
+                copied_any = True
+        except Exception:
+            copied_any = False
+        if copied_any:
+            break
 
 # Weekly start day options (Mon-Sun)
 WEEK_START_DAY_OPTIONS = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday']
@@ -126,8 +236,8 @@ DEFAULT_CONFIG = {
     'NEW_OUTLOOK_SIGNATURE_DISABLED': False,
 
     # Updates
-    'UPDATE_MANIFEST_URL': '',
-    'AUTO_CHECK_UPDATES': False,
+    'UPDATE_MANIFEST_URL': DEFAULT_UPDATE_MANIFEST_URL,
+    'AUTO_CHECK_UPDATES': True,
     'SKIPPED_UPDATE_VERSION': '',
     'LAST_UPDATE_CHECK': '',
     'LAST_UPDATE_VERSION_SEEN': '',
@@ -185,7 +295,13 @@ def normalize_update_payload(payload: dict) -> dict:
         raise ValueError('Update manifest must be a JSON object.')
 
     version = payload.get('latest_version') or payload.get('version') or payload.get('tag_name') or payload.get('name') or ''
-    download_url = payload.get('download_url') or payload.get('download_page_url') or payload.get('release_page_url') or payload.get('html_url') or ''
+
+    # Direct-download priority order:
+    # 1) Explicit manifest download_url (preferred for custom manifests)
+    # 2) Release assets (preferred for GitHub Releases API)
+    # 3) No fallback to html_url/release page, because the app expects a file,
+    #    not an HTML page. If there is no asset, keep the button disabled.
+    download_url = str(payload.get('download_url') or '').strip()
     assets = payload.get('assets') or []
     if not download_url and isinstance(assets, list):
         preferred = []
@@ -193,11 +309,11 @@ def normalize_update_payload(payload: dict) -> dict:
         for asset in assets:
             if not isinstance(asset, dict):
                 continue
-            candidate = asset.get('browser_download_url') or asset.get('url') or ''
+            candidate = str(asset.get('browser_download_url') or asset.get('url') or '').strip()
             if not candidate:
                 continue
             name = str(asset.get('name') or '').lower()
-            if name.endswith('.exe') or name.endswith('.msi') or name.endswith('.zip'):
+            if name.endswith(('.exe', '.msi', '.zip', '.7z')):
                 preferred.append(candidate)
             else:
                 others.append(candidate)
@@ -347,6 +463,13 @@ def normalize_frequency_string(freq_str: str):
             seen.add(item); dedup.append(item)
     ordered = [f for f in FREQUENCY_ORDER if f in dedup] + [f for f in dedup if f not in FREQUENCY_ORDER]
     return ordered, ', '.join(ordered)
+
+def normalize_period_source_string(period_source: str):
+    """Return (period_source_list, display_str). Blank means: use Frequency as the default source."""
+    raw = (period_source or '').strip()
+    if not raw:
+        return [], ''
+    return normalize_frequency_string(raw)
 
 def ot_date_display(date_obj: datetime.date) -> str:
     """Return OT date format as dd/mm/yyyy."""
@@ -668,18 +791,33 @@ class App(BaseWindow):
     def __init__(self):
         super().__init__(themename='flatly') if ('tb' in globals() and tb) else super().__init__()
         os.makedirs(RESOURCES_DIR, exist_ok=True)
+        migrate_legacy_resources_to_appdata()
         self._cleanup_old_data_files()
         self.load_config()
         self.load_presets()
 
-        self.title("Prod_task_generator")
+        self.title("SOD/EOD Report Generator")
         self.geometry("800x650")
 
         # Header bar
         self.header_frame = ttk.Frame(self, padding=(12, 10))
         self.header_frame.pack(fill='x')
-        ttk.Label(self.header_frame, text='Prod_task_generator', font=('Segoe UI', 14, 'bold')).pack(side='left')
+        title_wrap = ttk.Frame(self.header_frame)
+        title_wrap.pack(side='left')
+        ttk.Label(title_wrap, text='SOD/EOD Report Generator', font=('Segoe UI', 14, 'bold')).pack(side='left')
+        ttk.Label(title_wrap, text=f'v{APP_VERSION}', font=('Segoe UI', 8), foreground='#6B6B6B').pack(side='left', padx=(6, 0), pady=(3, 0))
 
+        self.header_update_notice_var = tk.StringVar(value='')
+        self.header_update_notice_wrap = ttk.Frame(self.header_frame)
+        self.header_update_notice_wrap.pack(side='left', fill='x', expand=True, padx=(12, 12))
+        self.header_update_notice_label = ttk.Label(
+            self.header_update_notice_wrap,
+            textvariable=self.header_update_notice_var,
+            foreground='#D93025',
+            anchor='center',
+            font=('Segoe UI', 9)
+        )
+        self.header_update_notice_label.pack(fill='x', expand=True)
 
         # Header navigation buttons (always visible)  # DO NOT REMOVE
 
@@ -687,11 +825,29 @@ class App(BaseWindow):
 
         nav.pack(side='right')
 
-        ttk.Button(nav, text='🏠 Home', command=lambda: self.show_frame(self.main_frame)).pack(side='left', padx=(0, 6))
+        self.home_button_wrap, self.home_button = self._create_header_nav_button(
+            nav,
+            text='🏠 Home',
+            command=lambda: self.show_frame(self.main_frame)
+        )
+        self.home_button_wrap.pack(side='left', padx=(0, 6))
 
-        ttk.Button(nav, text='⚙️ Management', command=lambda: self.show_frame(self.management_frame)).pack(side='left')
+        self.management_button_wrap, self.management_button = self._create_header_nav_button(
+            nav,
+            text='⚙️ Management',
+            command=lambda: self.show_frame(self.management_frame)
+        )
+        self.management_button_wrap.pack(side='left')
 
-        ttk.Button(nav, text='❓ Help', command=lambda: self.show_frame(self.help_frame)).pack(side='left', padx=(6, 0))
+        self.help_button_wrap, self.help_button = self._create_header_nav_button(
+            nav,
+            text='❓ Help',
+            command=lambda: self.show_frame(self.help_frame)
+        )
+        self.help_button_wrap.pack(side='left', padx=(6, 0))
+        self._help_update_dot_img = self._build_help_update_dot_image(size=14, color='#D93025')
+        self.help_update_dot = tk.Label(self.help_button_wrap, image=self._help_update_dot_img, bd=0, highlightthickness=0, padx=0, pady=0, bg=self._get_help_badge_bg())
+        self.help_update_dot.place_forget()
         self.main_frame = ttk.Frame(self)
         self.help_frame = ttk.Frame(self)
         self.main_frame.pack(fill="both", expand=True)
@@ -711,6 +867,7 @@ class App(BaseWindow):
         self.notebook.add(self.ot_out_frame, text="OT Out")
 
         self.sod_full_data_storage = {}
+        self.sod_period_source_overrides = {}
         self.eod_full_data = {}
 
         self.current_shift_date = None
@@ -726,6 +883,20 @@ class App(BaseWindow):
         self.create_presets_widgets()
         self.create_management_widgets()
         self.create_help_widgets()
+        self._latest_update_info = {}
+        self._last_update_check_error = ''
+        self._last_update_manifest_url = coerce_update_manifest_url(DEFAULT_UPDATE_MANIFEST_URL)
+        self._last_update_http_status = ''
+        self._last_update_response_preview = ''
+        self._set_update_badges(False)
+        try:
+            self.refresh_update_ui()
+        except Exception:
+            pass
+        try:
+            self._refresh_header_nav_buttons(self.main_frame)
+        except Exception:
+            pass
         try:
             self.after(1200, self.auto_check_for_updates_on_startup)
         except Exception:
@@ -767,9 +938,236 @@ class App(BaseWindow):
         except Exception:
             pass
 
-    # -----------------------------
-    # OUTLOOK VERSION + COPY WORKFLOW
-    # -----------------------------
+    def _get_header_nav_bg(self) -> str:
+        """Best-effort neutral background used by the header nav buttons."""
+        for widget in (getattr(self, 'header_frame', None), self):
+            if widget is None:
+                continue
+            for key in ('bg', 'background'):
+                try:
+                    value = widget.cget(key)
+                    if value:
+                        return str(value)
+                except Exception:
+                    pass
+        return '#FFFFFF'
+
+
+    def _create_header_nav_button(self, parent, text: str, command):
+        """Create a header nav button with a neutral background and border-only active state."""
+        base_bg = self._get_header_nav_bg()
+        wrap = tk.Frame(parent, bd=0, highlightthickness=0, bg=base_bg, padx=1, pady=1)
+        btn = tk.Button(
+            wrap,
+            text=text,
+            command=command,
+            relief='flat',
+            bd=0,
+            highlightthickness=0,
+            bg=base_bg,
+            activebackground=base_bg,
+            fg='#1F1F1F',
+            activeforeground='#1F4E79',
+            cursor='hand2',
+            font=('Segoe UI', 9),
+            padx=10,
+            pady=5,
+            takefocus=0
+        )
+        btn.pack(side='left')
+        return wrap, btn
+
+
+    def _set_header_nav_button_active(self, wrap, button, active: bool):
+        """Show a solid border only for the selected/current header nav button."""
+        base_bg = self._get_header_nav_bg()
+        border_color = '#1F4E79' if active else base_bg
+        fg_color = '#1F4E79' if active else '#1F1F1F'
+        font_value = ('Segoe UI', 9, 'bold') if active else ('Segoe UI', 9)
+        try:
+            wrap.configure(bg=border_color)
+        except Exception:
+            pass
+        try:
+            button.configure(
+                bg=base_bg,
+                activebackground=base_bg,
+                fg=fg_color,
+                activeforeground='#1F4E79',
+                font=font_value,
+                relief='flat',
+                bd=0,
+                highlightthickness=0
+            )
+        except Exception:
+            pass
+        try:
+            if getattr(self, 'help_button_wrap', None) is wrap and getattr(self, 'help_update_dot', None) is not None:
+                self.help_update_dot.configure(bg=border_color)
+        except Exception:
+            pass
+
+
+    def _refresh_header_nav_buttons(self, current_frame=None):
+        """Keep Home/Management/Help header buttons visually synced with the active page."""
+        frame = current_frame
+        if frame is None:
+            try:
+                frame = getattr(self, '_current_header_nav_frame', None)
+            except Exception:
+                frame = None
+        active_key = None
+        if frame == getattr(self, 'main_frame', None):
+            active_key = 'home'
+        elif frame in (
+            getattr(self, 'management_frame', None),
+            getattr(self, 'settings_frame', None),
+            getattr(self, 'presets_frame', None),
+        ):
+            active_key = 'management'
+        elif frame == getattr(self, 'help_frame', None):
+            active_key = 'help'
+        self._current_header_nav_frame = frame
+        for key, wrap_name, button_name in (
+            ('home', 'home_button_wrap', 'home_button'),
+            ('management', 'management_button_wrap', 'management_button'),
+            ('help', 'help_button_wrap', 'help_button'),
+        ):
+            wrap = getattr(self, wrap_name, None)
+            button = getattr(self, button_name, None)
+            if wrap is None or button is None:
+                continue
+            self._set_header_nav_button_active(wrap, button, key == active_key)
+
+
+    def _build_help_update_dot_image(self, size: int = 14, color: str = '#D93025'):
+        """Build a transparent circular badge image for the Help button."""
+        try:
+            px = max(8, int(size))
+        except Exception:
+            px = 14
+        try:
+            img = Image.new('RGBA', (px, px), (0, 0, 0, 0))
+            draw = ImageDraw.Draw(img)
+            inset = 1
+            draw.ellipse((inset, inset, px - inset - 1, px - inset - 1), fill=color, outline=color)
+            return ImageTk.PhotoImage(img)
+        except Exception:
+            return None
+
+
+    def _get_help_badge_bg(self) -> str:
+        """Best-effort background color used behind the Help update dot."""
+        try:
+            if hasattr(self, 'help_button_wrap') and self.help_button_wrap is not None:
+                value = self.help_button_wrap.cget('bg')
+                if value:
+                    return str(value)
+        except Exception:
+            pass
+        return self._get_header_nav_bg()
+
+
+    def _set_help_update_badge(self, visible: bool):
+        """Show/hide the tiny red dot on the Help button."""
+        self._help_update_available = bool(visible)
+        try:
+            if hasattr(self, 'help_button_wrap') and self.help_button_wrap is not None:
+                self.help_button_wrap.configure(bg=self._get_help_badge_bg())
+        except Exception:
+            pass
+        try:
+            if not hasattr(self, 'help_update_dot') or self.help_update_dot is None:
+                return
+            if getattr(self, '_help_update_dot_img', None) is None:
+                self._help_update_dot_img = self._build_help_update_dot_image(size=14, color='#D93025')
+                try:
+                    self.help_update_dot.configure(image=self._help_update_dot_img)
+                except Exception:
+                    pass
+            try:
+                self.help_update_dot.configure(bg=self._get_help_badge_bg())
+            except Exception:
+                pass
+            if visible:
+                self.help_update_dot.place(relx=1.0, x=-4, y=1, anchor='ne')
+                try:
+                    self.help_update_dot.lift()
+                except Exception:
+                    pass
+            else:
+                self.help_update_dot.place_forget()
+        except Exception:
+            pass
+
+
+    def _get_help_updates_tab_badge_bg(self) -> str:
+        """Best-effort background behind the Updates tab badge."""
+        for widget in (getattr(self, 'help_notebook', None), getattr(self, 'help_frame', None), self):
+            if widget is None:
+                continue
+            for key in ('bg', 'background'):
+                try:
+                    value = widget.cget(key)
+                    if value:
+                        return str(value)
+                except Exception:
+                    pass
+        return '#F0F0F0'
+
+
+    def _position_help_updates_tab_badge(self):
+        """Refresh the Updates tab badge state."""
+        try:
+            self._set_help_updates_tab_badge(bool(getattr(self, '_help_updates_tab_badge_visible', False)))
+        except Exception:
+            pass
+
+
+    def _set_help_updates_tab_badge(self, visible: bool):
+        """Show/hide the tiny red dot on the Help > Updates tab."""
+        self._help_updates_tab_badge_visible = bool(visible)
+        try:
+            nb = getattr(self, 'help_notebook', None)
+            updates_tab = getattr(self, 'help_updates_tab', None)
+            if nb is None or updates_tab is None:
+                return
+            if getattr(self, '_help_update_dot_img', None) is None:
+                self._help_update_dot_img = self._build_help_update_dot_image(size=14, color='#D93025')
+            if visible:
+                nb.tab(updates_tab, image=self._help_update_dot_img, compound='right')
+            else:
+                nb.tab(updates_tab, image='', compound='none')
+        except Exception:
+            pass
+
+
+    def _set_update_banner(self, visible: bool):
+        """Show/hide the centered header text when a new app version is available."""
+        try:
+            if hasattr(self, 'header_update_notice_var'):
+                self.header_update_notice_var.set('New app version is available' if visible else '')
+        except Exception:
+            pass
+
+
+    def _set_update_banner(self, visible: bool):
+        """Show/hide the centered header text when a new app version is available."""
+        try:
+            if hasattr(self, 'header_update_notice_var'):
+                self.header_update_notice_var.set('New app version is available' if visible else '')
+        except Exception:
+            pass
+
+
+    def _set_update_badges(self, visible: bool):
+        """Keep the centered header message, Help button badge, and Help > Updates tab badge in sync."""
+        self._help_update_available = bool(visible)
+        self._set_update_banner(visible)
+        self._set_help_update_badge(visible)
+        self._set_help_updates_tab_badge(visible)
+
+
     def _is_new_outlook(self) -> bool:
         """Return True if New Outlook mode is saved in config (not just selected)."""
         try:
@@ -3014,34 +3412,61 @@ class App(BaseWindow):
             self.config['NEW_OUTLOOK_SIGNATURE_DISABLED'] = bool(self.config.get('NEW_OUTLOOK_SIGNATURE_DISABLED', False))
         except Exception:
             self.config['NEW_OUTLOOK_SIGNATURE_DISABLED'] = False
-        self.config['UPDATE_MANIFEST_URL'] = HARDCODED_UPDATE_MANIFEST_URL
-        try:
-            self.config['AUTO_CHECK_UPDATES'] = bool(self.config.get('AUTO_CHECK_UPDATES', False))
-        except Exception:
-            self.config['AUTO_CHECK_UPDATES'] = False
+        self.config['UPDATE_MANIFEST_URL'] = coerce_update_manifest_url(self.config.get('UPDATE_MANIFEST_URL', DEFAULT_UPDATE_MANIFEST_URL))
+        self.config['AUTO_CHECK_UPDATES'] = True
         self.config['SKIPPED_UPDATE_VERSION'] = str(self.config.get('SKIPPED_UPDATE_VERSION', '') or '').strip()
         self.config['LAST_UPDATE_CHECK'] = str(self.config.get('LAST_UPDATE_CHECK', '') or '').strip()
         self.config['LAST_UPDATE_VERSION_SEEN'] = str(self.config.get('LAST_UPDATE_VERSION_SEEN', '') or '').strip()
 
     def _fetch_update_manifest(self, manifest_url: str) -> dict:
-        manifest_url = str(manifest_url or HARDCODED_UPDATE_MANIFEST_URL).strip()
+        manifest_url = coerce_update_manifest_url(manifest_url)
+        self._last_update_manifest_url = manifest_url
+        self._last_update_http_status = ''
+        self._last_update_response_preview = ''
         if not manifest_url:
-            raise ValueError('Hardcoded update URL is blank.')
+            raise ValueError('Update manifest URL is blank. Please save one in Settings > Updates.')
         req = urllib.request.Request(
             manifest_url,
             headers={
                 'User-Agent': f'{APP_NAME}/{APP_VERSION}',
-                'Accept': 'application/json, text/plain, */*',
+                'Accept': 'application/vnd.github+json, application/json, text/plain, */*',
+                'X-GitHub-Api-Version': '2022-11-28',
             },
         )
-        with urllib.request.urlopen(req, timeout=12) as response:
-            payload = json.loads(response.read().decode('utf-8'))
+        raw_text = ''
+        try:
+            with urllib.request.urlopen(req, timeout=12) as response:
+                self._last_update_http_status = str(getattr(response, 'status', '') or response.getcode() or '')
+                raw_text = response.read().decode('utf-8', errors='replace')
+                self._last_update_response_preview = raw_text[:500]
+        except urllib.error.HTTPError as e:
+            raw_text = ''
+            try:
+                raw_text = e.read().decode('utf-8', errors='replace')
+            except Exception:
+                raw_text = ''
+            self._last_update_http_status = str(getattr(e, 'code', '') or '')
+            self._last_update_response_preview = raw_text[:500]
+            response_hint = raw_text[:180].replace('\r', ' ').replace('\n', ' ').strip()
+            detail = f'HTTP {getattr(e, "code", "")} {getattr(e, "reason", "")} while checking updates.'.strip()
+            if response_hint:
+                detail += f' Response: {response_hint}'
+            raise RuntimeError(detail)
+        except urllib.error.URLError as e:
+            reason = getattr(e, 'reason', e)
+            raise RuntimeError(f'Network error while checking updates: {reason}')
+        try:
+            payload = json.loads(raw_text)
+        except json.JSONDecodeError as e:
+            preview = raw_text[:180].replace('\r', ' ').replace('\n', ' ').strip()
+            raise RuntimeError(f'Update manifest returned invalid JSON: {e}. Response: {preview}')
         return normalize_update_payload(payload)
 
 
     def auto_check_for_updates_on_startup(self):
         try:
-            if bool(self.config.get('AUTO_CHECK_UPDATES', False)):
+            manifest_url = str(self.config.get('UPDATE_MANIFEST_URL', '') or '').strip()
+            if manifest_url:
                 self.check_for_updates(show_no_update=False, startup=True)
         except Exception:
             pass
@@ -3054,6 +3479,85 @@ class App(BaseWindow):
         ok = webbrowser.open(url, new=2, autoraise=True)
         if not ok:
             raise RuntimeError('Could not open the download page in your default browser.')
+
+
+    def _guess_update_asset_filename(self, manifest_info: dict) -> str:
+        """Suggest a filename for the downloadable update asset."""
+        info = manifest_info if isinstance(manifest_info, dict) else {}
+        raw = info.get('raw') if isinstance(info.get('raw'), dict) else {}
+        assets = raw.get('assets') if isinstance(raw, dict) else []
+        if isinstance(assets, list):
+            for asset in assets:
+                if not isinstance(asset, dict):
+                    continue
+                name = str(asset.get('name') or '').strip()
+                candidate = str(asset.get('browser_download_url') or asset.get('url') or '').strip()
+                if name and candidate and candidate == str(info.get('download_url') or '').strip():
+                    return name
+            for asset in assets:
+                if not isinstance(asset, dict):
+                    continue
+                name = str(asset.get('name') or '').strip()
+                if name:
+                    return name
+        url = str(info.get('download_url') or '').strip()
+        if url:
+            candidate = url.split('?', 1)[0].split('#', 1)[0].rstrip('/')
+            name = os.path.basename(candidate)
+            if name:
+                return name
+        latest_version = clean_version_string(info.get('latest_version', '')) or 'update'
+        return f'sod_eod_update_{latest_version}.bin'
+
+
+    def download_latest_update_asset(self):
+        """Download the latest release asset to a user-selected location."""
+        info = dict(getattr(self, '_latest_update_info', {}) or {})
+        if not bool(info.get('update_available', False)):
+            return
+        download_url = str(info.get('download_url') or '').strip()
+        if not download_url:
+            messagebox.showerror('Download Update', 'No downloadable release asset was provided by the latest release.')
+            return
+        initial_name = self._guess_update_asset_filename(info)
+        ext = os.path.splitext(initial_name)[1] or '.bin'
+        filetypes = [
+            ('Application / Archive Files', '*.exe *.msi *.zip'),
+            ('All Files', '*.*'),
+        ]
+        save_path = filedialog.asksaveasfilename(
+            title='Save Update As',
+            initialfile=initial_name,
+            defaultextension=ext,
+            filetypes=filetypes,
+        )
+        if not save_path:
+            return
+        try:
+            req = urllib.request.Request(
+                download_url,
+                headers={
+                    'User-Agent': f'{APP_NAME}/{APP_VERSION}',
+                    'Accept': 'application/octet-stream, */*',
+                },
+            )
+            with urllib.request.urlopen(req, timeout=120) as response, open(save_path, 'wb') as f:
+                content_type = str(response.headers.get('Content-Type', '') or '').lower()
+                if 'text/html' in content_type:
+                    raise ValueError('The latest release did not provide a direct downloadable asset.')
+                while True:
+                    chunk = response.read(1024 * 256)
+                    if not chunk:
+                        break
+                    f.write(chunk)
+            messagebox.showinfo('Update Downloaded', 'Download Successful')
+        except Exception as e:
+            try:
+                if os.path.exists(save_path) and os.path.getsize(save_path) == 0:
+                    os.remove(save_path)
+            except Exception:
+                pass
+            messagebox.showerror('Download Update Failed', 'Could not download the latest release asset.\n\nDetails: {}'.format(e))
 
 
     def _build_update_message(self, manifest_info: dict) -> str:
@@ -3072,16 +3576,31 @@ class App(BaseWindow):
 
 
     def check_for_updates(self, show_no_update: bool = True, startup: bool = False):
-        manifest_url = HARDCODED_UPDATE_MANIFEST_URL
+        manifest_url = coerce_update_manifest_url(self.config.get('UPDATE_MANIFEST_URL', ''))
+        self._last_update_manifest_url = manifest_url
+        self._last_update_check_error = ''
+        if not manifest_url:
+            self._latest_update_info = {}
+            self._last_update_check_error = 'No Update Manifest URL is saved yet. Go to Settings > Updates and save one first.'
+            self._set_update_badges(False)
+            self.refresh_update_ui()
+            if show_no_update:
+                messagebox.showinfo('Updates', self._last_update_check_error)
+            return False
 
         try:
             info = self._fetch_update_manifest(manifest_url)
         except Exception as e:
+            self._latest_update_info = {}
+            self._last_update_check_error = str(e)
+            self._set_update_badges(False)
+            self.refresh_update_ui()
             if show_no_update or not startup:
-                messagebox.showerror('Update Check Failed', f'Could not check for updates.\n\nDetails: {e}')
+                messagebox.showerror('Update Check Failed', 'Could not check for updates.\n\nDetails: {}'.format(e))
             return False
 
         latest_version = clean_version_string(info.get('latest_version', ''))
+        self._last_update_check_error = ''
         self.config['LAST_UPDATE_CHECK'] = datetime.datetime.now().isoformat(timespec='seconds')
         self.config['LAST_UPDATE_VERSION_SEEN'] = latest_version
         try:
@@ -3089,72 +3608,40 @@ class App(BaseWindow):
                 json.dump(self.config, f, indent=4)
         except Exception:
             pass
-        self.refresh_update_ui()
 
+        payload = dict(info or {})
+        payload['manifest_url'] = manifest_url
         if not latest_version:
+            payload['latest_version'] = ''
+            payload['update_available'] = False
+            self._latest_update_info = payload
+            self._last_update_check_error = 'The manifest was reached, but it did not contain a latest version value.'
+            self._set_update_badges(False)
+            self.refresh_update_ui()
             if show_no_update:
-                messagebox.showwarning('Updates', 'The manifest was reached, but it did not contain a latest version value.')
+                messagebox.showwarning('Updates', self._last_update_check_error)
             return False
 
         cmp_result = compare_version_strings(APP_VERSION, latest_version)
-        skipped = clean_version_string(self.config.get('SKIPPED_UPDATE_VERSION', ''))
-        mandatory = bool(info.get('mandatory', False))
+        payload['latest_version'] = latest_version
+        payload['update_available'] = bool(cmp_result < 0)
+        self._latest_update_info = payload
+        self._set_update_badges(bool(cmp_result < 0))
+        self.refresh_update_ui()
 
         if cmp_result >= 0:
-            self.refresh_update_ui()
             if show_no_update:
-                messagebox.showinfo('Updates', f'You are already on the latest version ({clean_version_string(APP_VERSION) or APP_VERSION}).')
+                messagebox.showinfo('Updates', 'You are already on the latest version ({}).'.format(clean_version_string(APP_VERSION) or APP_VERSION))
             return False
 
-        if startup and skipped and skipped == latest_version and not mandatory:
-            return False
-
-        choice = messagebox.askyesnocancel('Update Available', self._build_update_message(info))
-        if choice is None:
-            if not mandatory:
-                self.config['SKIPPED_UPDATE_VERSION'] = latest_version
-                try:
-                    with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
-                        json.dump(self.config, f, indent=4)
-                except Exception:
-                    pass
-            self.refresh_update_ui()
-            return True
-
-        if choice:
-            self.config['SKIPPED_UPDATE_VERSION'] = ''
-            try:
-                with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
-                    json.dump(self.config, f, indent=4)
-            except Exception:
-                pass
-            self.refresh_update_ui()
-            try:
-                self.open_update_download(info.get('download_url', ''))
-            except Exception as e:
-                messagebox.showerror('Open Download Failed', f'An update is available, but the download page could not be opened.\n\nDetails: {e}')
-            return True
-
-        if not mandatory:
-            self.config['SKIPPED_UPDATE_VERSION'] = latest_version
-            try:
-                with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
-                    json.dump(self.config, f, indent=4)
-            except Exception:
-                pass
-        self.refresh_update_ui()
         return True
 
-
     def save_update_settings(self):
-        self.config['UPDATE_MANIFEST_URL'] = HARDCODED_UPDATE_MANIFEST_URL
+        """Legacy no-op retained for backward compatibility."""
         try:
-            self.config['AUTO_CHECK_UPDATES'] = bool(self.auto_check_updates_var.get())
+            self.refresh_update_ui()
         except Exception:
-            self.config['AUTO_CHECK_UPDATES'] = bool(self.config.get('AUTO_CHECK_UPDATES', False))
-        self.save_config()
-        self.refresh_update_ui()
-
+            pass
 
     def clear_skipped_update_version(self):
         self.config['SKIPPED_UPDATE_VERSION'] = ''
@@ -3167,29 +3654,47 @@ class App(BaseWindow):
         messagebox.showinfo('Updates', 'Skipped update version has been cleared.')
 
     def refresh_update_ui(self):
-        """Refresh Help > Updates controls from current config."""
+        """Refresh Help > Updates controls from the latest update check state."""
+        info = dict(getattr(self, '_latest_update_info', {}) or {})
+        latest_version = clean_version_string(info.get('latest_version', ''))
+        has_update = bool(info.get('update_available', False))
+        if latest_version and 'update_available' not in info:
+            has_update = compare_version_strings(APP_VERSION, latest_version) < 0
+        error_text = str(getattr(self, '_last_update_check_error', '') or '').strip()
+        notes = str(info.get('release_notes', '') or '').strip() if has_update else 'You are running the latest version'
+        title_text = 'Update Available' if has_update else 'Your app is current'
+        title_color = '#D93025' if has_update else '#1F7A1F'
+        subtitle_text = 'Please replace your app with the new one' if has_update else ''
+        if error_text and not has_update:
+            title_text = 'Update Check Failed'
+            title_color = '#D93025'
+            subtitle_text = 'See diagnostics below'
+            notes = error_text
         try:
-            self.config['UPDATE_MANIFEST_URL'] = HARDCODED_UPDATE_MANIFEST_URL
-            if hasattr(self, 'update_manifest_entry'):
+            if hasattr(self, 'update_title_label'):
+                self.update_title_label.config(text=title_text, foreground=title_color)
+            if hasattr(self, 'update_subtitle_label'):
+                self.update_subtitle_label.config(text=subtitle_text, foreground='#1F4E79')
+            if hasattr(self, 'update_release_notes_text'):
+                self.update_release_notes_text.config(state='normal')
+                self.update_release_notes_text.delete('1.0', tk.END)
+                self.update_release_notes_text.insert('1.0', notes)
                 try:
-                    self.update_manifest_entry.config(state='normal')
+                    self.update_release_notes_text.update_idletasks()
+                    display_lines = self.update_release_notes_text.count('1.0', 'end-1c', 'displaylines')
+                    if display_lines:
+                        new_height = max(2, min(18, int(display_lines[0]) + 1))
+                        self.update_release_notes_text.config(height=new_height)
                 except Exception:
-                    pass
-                self.update_manifest_entry.delete(0, tk.END)
-                self.update_manifest_entry.insert(0, HARDCODED_UPDATE_MANIFEST_URL)
-                try:
-                    self.update_manifest_entry.config(state='readonly')
-                except Exception:
-                    pass
-            if hasattr(self, 'auto_check_updates_var'):
-                self.auto_check_updates_var.set(bool(self.config.get('AUTO_CHECK_UPDATES', False)))
-            if hasattr(self, 'update_status_label'):
-                skipped = self.config.get('SKIPPED_UPDATE_VERSION', '') or '(none)'
-                last_check = self.config.get('LAST_UPDATE_CHECK', '') or '(never)'
-                last_seen = self.config.get('LAST_UPDATE_VERSION_SEEN', '') or '(none)'
-                self.update_status_label.config(text=f'API: {HARDCODED_UPDATE_MANIFEST_URL}\nLast check: {last_check} | Last seen version: {last_seen} | Skipped: {skipped}')
+                    logical_lines = max(2, min(18, sum(max(1, ((len(part) // 80) + 1)) for part in ((notes.splitlines() or ['']) or ['']))))
+                    self.update_release_notes_text.config(height=logical_lines)
+                self.update_release_notes_text.config(state='disabled')
+            if hasattr(self, 'update_download_button'):
+                btn_state = 'normal' if (has_update and str(info.get('download_url', '') or '').strip()) else 'disabled'
+                self.update_download_button.config(text='Download Update', state=btn_state)
         except Exception:
             pass
+
     def save_config(self):
         with open(CONFIG_FILE, 'w') as f:
             json.dump(self.config, f, indent=4)
@@ -3273,110 +3778,51 @@ class App(BaseWindow):
 
 
     def _refresh_sod_task_frequencies(self):
-
         """Update frequency/period for existing SOD tasks based on TaskDropdown mapping.
-
-        This enables real-time updates when the user edits Task Dropdown Options frequencies.
-
-        Only updates tasks whose Tasklist exists in the mapping and the mapped frequency is non-empty."""
-
+        Preserves any Period Source override that came from presets."""
         try:
-
             tree = getattr(self, 'sod_tree', None)
-
             store = getattr(self, 'sod_full_data_storage', None)
-
             if tree is None or store is None:
-
                 return
-
         except Exception:
-
             return
-
-        # Ensure cache exists
-
         try:
-
             if not hasattr(self, 'taskdropdown_freq_map'):
-
                 self._refresh_taskdropdown_cache()
-
         except Exception:
-
             pass
-
-        updated = 0
-
         for iid in list(tree.get_children()):
-
             try:
-
                 row = store.get(iid)
-
                 if not row or len(row) < 8:
-
                     continue
-
                 tasklist, stream, freq, period, start_t, end_t, issue, remarks = row
-
                 mapped = (self.get_task_dropdown_frequency(tasklist) or '').strip()
-
                 if not mapped:
-
                     continue
-
-                # Normalize and compare
-
                 _fl, mapped_disp = normalize_frequency_string(mapped)
-
                 mapped_final = (mapped_disp or mapped).strip()
-
                 _fl2, freq_disp = normalize_frequency_string(freq)
-
                 freq_final = (freq_disp or (freq or '')).strip()
-
                 if mapped_final and mapped_final != freq_final:
-
-                    new_period = self.calculate_period(mapped_final)
-
-                    # Update tree display (keeps Action column)
-
-
+                    period_source_override = getattr(self, 'sod_period_source_overrides', {}).get(iid, '')
+                    new_period = self.calculate_period(mapped_final, period_source_override)
                     try:
-
                         cur_vals = list(tree.item(iid, 'values'))
-
-                        # Expected columns: Tasklist, Stream, Frequency, Period, Start Time, End Time, Issue Encountered, Remarks, Action
-
                         if len(cur_vals) >= 9:
-
                             cur_vals[2] = mapped_final
-
                             cur_vals[3] = new_period
-
                             tree.item(iid, values=tuple(cur_vals))
-
                     except Exception:
-
                         pass
-
                     store[iid] = (tasklist, stream, mapped_final, new_period, start_t, end_t, issue, remarks)
-
-                    updated += 1
-
             except Exception:
-
                 continue
-
-        # No messagebox here (silent refresh)
-
-
 
     def _refresh_sod_task_periods(self):
         """Recompute Period column for existing SOD tasks based on current General settings.
-
-        This updates listed tasks immediately after saving changes in Settings > General."""
+        Preserves any preset-based Period Source override."""
         try:
             tree = getattr(self, 'sod_tree', None)
             store = getattr(self, 'sod_full_data_storage', None)
@@ -3390,9 +3836,9 @@ class App(BaseWindow):
                 if not row or len(row) < 8:
                     continue
                 tasklist, stream, freq, period, start_t, end_t, issue, remarks = row
-                new_period = self.calculate_period(freq)
+                period_source_override = getattr(self, 'sod_period_source_overrides', {}).get(iid, '')
+                new_period = self.calculate_period(freq, period_source_override)
                 if (new_period or '') != (period or ''):
-                    # Update tree display
                     try:
                         cur_vals = list(tree.item(iid, 'values'))
                         if len(cur_vals) >= 9:
@@ -3403,9 +3849,6 @@ class App(BaseWindow):
                     store[iid] = (tasklist, stream, freq, new_period, start_t, end_t, issue, remarks)
             except Exception:
                 continue
-
-
-
 
     def _refresh_sod_task_periods_preview(self):
 
@@ -3575,8 +4018,6 @@ class App(BaseWindow):
             preset_key = self.preset_key_var.get()
             tasks = [self.preset_tree.item(item, 'values') for item in self.preset_tree.get_children()]
             tasks_to_save = [list(row[:-1]) for row in tasks]
-
-            # Automatic frequencies for Daily/Weekday/Monthly preset types
             try:
                 if preset_type in ('Daily', 'Weekday', 'Monthly'):
                     rebuilt = []
@@ -3586,85 +4027,64 @@ class App(BaseWindow):
                         task = row[0]
                         stream_in = (row[1] if len(row) > 1 else '')
                         freq_in = (row[2] if len(row) > 2 else '')
-                        # Daily preset is always Daily
-                        if preset_type == 'Daily':
-                            freq_final = 'Daily'
-                        else:
-                            _fl, _fd = normalize_frequency_string(str(freq_in))
-                            freq_final = (_fd or str(freq_in).strip())
-                            if not freq_final and preset_type == 'Weekday':
-                                freq_final = 'Weekly'
-                            if not freq_final and preset_type == 'Monthly':
-                                freq_final = 'Monthly'
-                        st = row[3] if len(row) > 3 else ''
-                        et = row[4] if len(row) > 4 else ''
-                        rebuilt.append([task, stream_in, freq_final, '', st, et])
+                        period_source_in = (row[3] if len(row) > 3 else '')
+                        _fl, _fd = normalize_frequency_string(str(freq_in))
+                        freq_final = (_fd or str(freq_in).strip())
+                        _psl, _psd = normalize_period_source_string(str(period_source_in))
+                        period_source_final = _psd or ''
+                        st = row[4] if len(row) > 4 else ''
+                        et = row[5] if len(row) > 5 else ''
+                        rebuilt.append([task, stream_in, freq_final, period_source_final, st, et])
                     tasks_to_save = rebuilt
             except Exception:
                 pass
-
             save_location_text = ""
             if preset_type == "Daily":
                 self.presets["Daily"] = tasks_to_save
                 save_location_text = "Daily"
-
             elif preset_type == "Weekday":
                 if not preset_key:
                     messagebox.showwarning("Warning", "Please select a weekday.")
                     return
                 self.presets["Weekdays"][preset_key] = tasks_to_save
-                save_location_text = f"Weekday: {preset_key}"
-
+                save_location_text = "Weekday: {}".format(preset_key)
             elif preset_type == "Monthly":
                 if not preset_key:
                     messagebox.showwarning("Warning", "Please select a day of the month.")
                     return
                 self.presets["Monthly"][preset_key] = tasks_to_save
-                save_location_text = f"Monthly: Day {preset_key}"
-
+                save_location_text = "Monthly: Day {}".format(preset_key)
             elif preset_type == "Task Dropdown Options":
-                # Backward compatible save:
-                # - If all frequencies blank -> keep original presets.json format (list of strings)
-                # - If any frequency set -> save as list of [task, frequency] pairs
                 task_pairs = []
                 any_freq = False
                 for row in tasks_to_save:
                     if not row:
                         continue
                     task = row[0]
-                    freq = row[1] if len(row) > 1 else ''
+                    freq = row[2] if len(row) > 2 else (row[1] if len(row) > 1 else '')
                     task_pairs.append([task, freq])
                     if str(freq).strip() != "":
                         any_freq = True
-
                 if any_freq:
                     self.presets["TaskDropdown"] = task_pairs
                 else:
                     self.presets["TaskDropdown"] = [tp[0] for tp in task_pairs if tp and tp[0]]
-
                 save_location_text = "Task Dropdown Options"
-
             with open(PRESETS_FILE, 'w') as f:
                 json.dump(self.presets, f, indent=4)
-
             if preset_type == "Task Dropdown Options":
                 try:
                     self._refresh_taskdropdown_cache()
                 except Exception:
                     pass
-            try:
-                self._refresh_sod_task_frequencies()
-            except Exception:
-                pass
-
-            messagebox.showinfo("Success", f"Presets for {save_location_text} have been saved!")
-
+                try:
+                    self._refresh_sod_task_frequencies()
+                except Exception:
+                    pass
+            messagebox.showinfo("Success", "Presets for {} have been saved!".format(save_location_text))
         except Exception as e:
-            messagebox.showerror("Error", f"Could not save presets.\n\nDetails: {e}")
+            messagebox.showerror("Error", "Could not save presets.\n\nDetails: {}".format(e))
 
-    # -----------------------------
-    # FRAME NAVIGATION
-    # -----------------------------
     def show_frame(self, frame_to_show):
         self.main_frame.pack_forget()
         self.settings_frame.pack_forget()
@@ -3672,6 +4092,10 @@ class App(BaseWindow):
         self.management_frame.pack_forget()
         self.help_frame.pack_forget()
         frame_to_show.pack(fill="both", expand=True)
+        try:
+            self._refresh_header_nav_buttons(frame_to_show)
+        except Exception:
+            pass
         if frame_to_show == self.main_frame:
             self.load_config()
 
@@ -3681,6 +4105,11 @@ class App(BaseWindow):
                 pass
             try:
                 self._refresh_sod_task_periods()
+            except Exception:
+                pass
+        elif frame_to_show == self.help_frame:
+            try:
+                self.after(0, lambda: self._set_help_updates_tab_badge(bool(getattr(self, '_help_updates_tab_badge_visible', False))))
             except Exception:
                 pass
     # -----------------------------
@@ -3820,25 +4249,7 @@ class App(BaseWindow):
             pass
 
         try:
-            self.config['UPDATE_MANIFEST_URL'] = HARDCODED_UPDATE_MANIFEST_URL
-            if hasattr(self, 'update_manifest_entry'):
-                try:
-                    self.update_manifest_entry.config(state='normal')
-                except Exception:
-                    pass
-                self.update_manifest_entry.delete(0, tk.END)
-                self.update_manifest_entry.insert(0, HARDCODED_UPDATE_MANIFEST_URL)
-                try:
-                    self.update_manifest_entry.config(state='readonly')
-                except Exception:
-                    pass
-            if hasattr(self, 'auto_check_updates_var'):
-                self.auto_check_updates_var.set(bool(self.config.get('AUTO_CHECK_UPDATES', False)))
-            if hasattr(self, 'update_status_label'):
-                skipped = self.config.get('SKIPPED_UPDATE_VERSION', '') or '(none)'
-                last_check = self.config.get('LAST_UPDATE_CHECK', '') or '(never)'
-                last_seen = self.config.get('LAST_UPDATE_VERSION_SEEN', '') or '(none)'
-                self.update_status_label.config(text=f'Last check: {last_check} | Last seen version: {last_seen} | Skipped: {skipped}')
+            self.refresh_update_ui()
         except Exception:
             pass
 
@@ -4693,13 +5104,19 @@ class App(BaseWindow):
 
         nb = ttk.Notebook(self.help_frame)
         nb.pack(padx=10, pady=10, fill='both', expand=True)
+        self.help_notebook = nb
 
         tab_instr = ttk.Frame(nb)
         tab_about = ttk.Frame(nb)
         tab_updates = ttk.Frame(nb)
+        self.help_updates_tab = tab_updates
         nb.add(tab_instr, text='Instructions')
         nb.add(tab_about, text='About')
         nb.add(tab_updates, text='Updates')
+        try:
+            nb.tab(tab_updates, image='', compound='right')
+        except Exception:
+            pass
 
         def _make_readonly_text(parent, content):
             wrap = ttk.Frame(parent)
@@ -4720,32 +5137,36 @@ class App(BaseWindow):
             txt.config(state='disabled')
             return txt
 
-        _make_readonly_text(tab_instr, 'Welcome! This tool helps you create accurate Start-of-Day (SOD) and End-of-Day (EOD) email drafts quickly and consistently.\n\nQUICK START (Most common flow)\n1) Home → Start of Day (SOD)\n   • Click “Load Preset” to load today’s tasks automatically.\n   • Review tasks, then click “Prepare SOD Email Draft” (Classic Outlook) OR use “Copy Body/Subject” (New Outlook).\n\n2) Home → End of Day (EOD)\n   • Click “Load Tasks” to load the tasks you prepared in SOD.\n   • Mark each task status (Done / In Progress / Carried Over).\n   • Add optional attendance screenshot (Classic Outlook only).\n   • Click “Prepare EOD Email Draft” OR use Copy buttons (New Outlook).\n\nHOME PAGE TABS\nA) Start of Day (SOD)\n• Add Task: Enter Tasklist + Stream + Frequency (optional) + Start/End times (optional).\n• Saved Tasks dropdown: choose from “Task Dropdown Options” (Management → Edit Daily Presets).\n• Load Preset: loads Daily + today’s Weekday + today’s Monthly tasks.\n• Load Unfinished Tasks: loads tasks from the latest EOD where status was In Progress / Carried Over.\n• Reorder: use ▲/▼ buttons.\n• Edit: double‑click a task row to edit values.\n• Remove: click the ❌ Action column.\n\nB) End of Day (EOD)\n• Load Tasks: loads tasks from the most recent SOD snapshot.\n• Set Status: click Done / In Progress / Carried Over.\n• Screenshot: Paste/Browse (disabled in New Outlook mode).\n• Prepare Draft / Copy: build the EOD email content.\n\nC) OT In / OT Out\n• OT In: select OT date, set OT From/To, add OT tasks and status.\n• OT Out: load OT In tasks, set actual end time, update status, then generate draft.\n\nMANAGEMENT\n1) Edit Application Settings\n   • General: controls how Period is calculated for Daily/Weekly/Monthly.\n   • Name / Signature / Stream / Country / Schedule\n   • To / CC: classic recipients (names) and New Outlook recipients (emails).\n   • Outlook Version: choose Classic vs New Outlook behavior.\n\n2) Edit Daily Presets\n   • Daily: always daily tasks.\n   • Weekday: tasks per weekday.\n   • Monthly: tasks per day‑of‑month.\n   • Task Dropdown Options: saved tasks shown under SOD “Saved Tasks”. You can also assign a default frequency per task.\n\nOUTLOOK MODES\n• Classic Outlook (Desktop)\n  – Uses Outlook automation to create a draft automatically.\n  – Supports Attendance screenshot attachment in EOD.\n\n• New Outlook (Copy/Paste)\n  – Use Copy buttons (Copy Body / Copy Subject / Copy To / Copy CC).\n  – Screenshots are disabled.\n  – New Outlook To/CC expects: firstname.lastname@iqvia.com\n\nTIPS\n• Period is computed from Frequency using General settings.\n• If you edit Task Dropdown Options frequencies, existing listed tasks update accordingly.\n\nTROUBLESHOOTING\n• If Classic Outlook draft creation fails, ensure Outlook Desktop is installed and running.\n• If HTML paste looks off in New Outlook, paste normally (Ctrl+V) into the message body.\n')
-        _make_readonly_text(tab_about, 'Prod_task_generator\n\nThis app streamlines daily reporting by generating structured SOD, EOD, and OT email drafts.\n\nCreator\n• Allen Paul Olguera\n• Vibe coder 😄 — the idea, direction, testing, and compilation were done by Allen Paul Olguera.\n• Implementation is AI‑assisted and hard‑coded into this tool following the creator’s specifications.\n\nSupport / Suggestions\nIf you find a bug or have improvement suggestions, please contact:\nallenpaul.olguera@iqvia.com\n')
+        _make_readonly_text(tab_instr, 'Welcome! This tool helps you create accurate Start-of-Day (SOD) and End-of-Day (EOD) email drafts quickly and consistently.\n\nQUICK START (Most common flow)\n1) Home → Start of Day (SOD)\n   • Click “Load Preset” to load today’s tasks automatically.\n   • Review tasks, then click “Prepare SOD Email Draft” (Classic Outlook) OR use “Copy Body/Subject” (New Outlook).\n\n2) Home → End of Day (EOD)\n   • Click “Load Tasks” to load the tasks you prepared in SOD.\n   • Mark each task status (Done / In Progress / Carried Over).\n   • Add optional attendance screenshot (Classic Outlook only).\n   • Click “Prepare EOD Email Draft” OR use Copy buttons (New Outlook).\n\nHOME PAGE TABS\nA) Start of Day (SOD)\n• Add Task: Enter Tasklist + Stream + Frequency (optional) + Period (optional) + Start/End times (optional).\n• Saved Tasks dropdown: choose from “Task Dropdown Options” (Management → Edit Daily Presets).\n• Load Preset: loads Daily + today’s Weekday + today’s Monthly tasks.\n• Load Unfinished Tasks: loads tasks from the latest EOD where status was In Progress / Carried Over.\n• Reorder: use ▲/▼ buttons.\n• Edit: double‑click a task row to edit values.\n• Remove: click the ❌ Action column.\n\nB) End of Day (EOD)\n• Load Tasks: loads tasks from the most recent SOD snapshot.\n• Set Status: click Done / In Progress / Carried Over.\n• Screenshot: Paste/Browse (disabled in New Outlook mode).\n• Prepare Draft / Copy: build the EOD email content.\n\nC) OT In / OT Out\n• OT In: select OT date, set OT From/To, add OT tasks and status.\n• OT Out: load OT In tasks, set actual end time, update status, then generate draft.\n\nMANAGEMENT\n1) Edit Application Settings\n   • General: controls how Period is calculated for Daily/Weekly/Monthly.\n   • Name / Signature / Stream / Country / Schedule\n   • To / CC: classic recipients (names) and New Outlook recipients (emails).\n   • Outlook Version: choose Classic vs New Outlook behavior.\n\n2) Edit Daily Presets\n   • Daily: always daily tasks.\n   • Weekday: tasks per weekday.\n   • Monthly: tasks per day‑of‑month.\n   • Task Dropdown Options: saved tasks shown under SOD “Saved Tasks”. You can also assign a default frequency per task.\n\nOUTLOOK MODES\n• Classic Outlook (Desktop)\n  – Uses Outlook automation to create a draft automatically.\n  – Supports Attendance screenshot attachment in EOD.\n\n• New Outlook (Copy/Paste)\n  – Use Copy buttons (Copy Body / Copy Subject / Copy To / Copy CC).\n  – Screenshots are disabled.\n  – New Outlook To/CC expects: firstname.lastname@iqvia.com\n\nTIPS\n• Period is computed from Frequency using General settings.\n• If you edit Task Dropdown Options frequencies, existing listed tasks update accordingly.\n\nTROUBLESHOOTING\n• If Classic Outlook draft creation fails, ensure Outlook Desktop is installed and running.\n• If HTML paste looks off in New Outlook, paste normally (Ctrl+V) into the message body.\n')
+        _make_readonly_text(tab_about, 'SOD/EOD Report Generator\n\nThis app streamlines daily reporting by generating structured SOD, EOD, and OT email drafts.\n\nCreator\n• Allen Paul Olguera (Choi)\n• Vibe coder 😄 — the idea, direction, testing, and compilation were done by Allen Paul Olguera.\n• Implementation is AI‑assisted and hard‑coded into this tool following the creator’s specifications.\n\nSupport / Suggestions\nIf you find a bug or have improvement suggestions, please contact:\nallenpaul.olguera@iqvia.com\n')
 
         # --- Updates tab inside Help ---
-        ttk.Label(tab_updates, text='Update Settings', font=('Segoe UI', 11, 'bold')).pack(padx=10, pady=(15, 5), anchor='w')
-        ttk.Label(tab_updates, text='Hardcoded GitHub Release API URL:').pack(padx=10, pady=(5, 5), anchor='w')
-        self.update_manifest_entry = ttk.Entry(tab_updates, width=90)
-        self.update_manifest_entry.pack(padx=10, pady=(0, 8), fill='x')
+        self.update_title_label = ttk.Label(tab_updates, text='Your app is current', font=('Segoe UI', 11, 'bold'), foreground='#1F7A1F')
+        self.update_title_label.pack(padx=10, pady=(15, 2), anchor='w')
+        self.update_subtitle_label = ttk.Label(tab_updates, text='', font=('Segoe UI', 10), foreground='#1F4E79')
+        self.update_subtitle_label.pack(padx=10, pady=(0, 8), anchor='w')
+
+        notes_wrap = ttk.Frame(tab_updates)
+        notes_wrap.pack(fill='x', expand=False, padx=10, pady=(0, 10))
+        self.update_release_notes_text = tk.Text(notes_wrap, wrap='word', height=2)
+        self.update_release_notes_text.pack(side='left', fill='x', expand=True)
+        update_notes_sb = ttk.Scrollbar(notes_wrap, orient='vertical', command=self.update_release_notes_text.yview)
+        update_notes_sb.pack(side='right', fill='y')
         try:
-            self.update_manifest_entry.insert(0, self.config.get('UPDATE_MANIFEST_URL', ''))
+            self.update_release_notes_text.configure(yscrollcommand=update_notes_sb.set, font=('Segoe UI', 10))
         except Exception:
             pass
-        ttk.Label(tab_updates, text='Supports either a custom manifest.json URL or the GitHub Releases latest API URL.', foreground='#6B6B6B').pack(padx=10, pady=(0, 8), anchor='w')
-        self.auto_check_updates_var = tk.BooleanVar(value=bool(self.config.get('AUTO_CHECK_UPDATES', False)))
-        ttk.Checkbutton(tab_updates, text='Automatically check for updates on startup', variable=self.auto_check_updates_var).pack(padx=10, pady=(0, 10), anchor='w')
-        self.update_status_label = ttk.Label(tab_updates, text='Last check: (never) | Last seen version: (none) | Skipped: (none)', foreground='#1F4E79')
-        self.update_status_label.pack(padx=10, pady=(0, 10), anchor='w')
+        self.update_release_notes_text.config(state='disabled')
+
         updates_btn_row = ttk.Frame(tab_updates)
-        updates_btn_row.pack(padx=10, pady=(5, 10), anchor='w')
-        ttk.Button(updates_btn_row, text='Save Update Preferences', command=self.save_update_settings).pack(side='left')
-        ttk.Button(updates_btn_row, text='Check for Updates', command=lambda: self.check_for_updates(show_no_update=True, startup=False)).pack(side='left', padx=(8, 0))
-        ttk.Button(updates_btn_row, text='Clear Skipped Version', command=self.clear_skipped_update_version).pack(side='left', padx=(8, 0))
+        updates_btn_row.pack(padx=10, pady=(0, 10), anchor='w')
+        self.update_download_button = ttk.Button(updates_btn_row, text='Download Update', command=self.download_latest_update_asset, state='disabled')
+        self.update_download_button.pack(side='left')
         try:
             self.refresh_update_ui()
         except Exception:
             pass
+
     def move_task(self, tree, direction):
         selected_item = tree.focus()
         if not selected_item:
@@ -4784,30 +5205,39 @@ class App(BaseWindow):
             width=15
         )
         self.frequency_combo.grid(row=2, column=1, sticky="w", padx=5, pady=2)
+        ttk.Label(sod_input_frame, text="Period:").grid(row=3, column=0, sticky="w", padx=5, pady=2)
+        self.sod_period_source_var = tk.StringVar()
+        self.sod_period_source_combo = ttk.Combobox(
+            sod_input_frame,
+            textvariable=self.sod_period_source_var,
+            values=['', 'Daily', 'Weekly', 'Monthly', 'Daily, Weekly', 'Daily, Monthly', 'Weekly, Monthly', 'Daily, Weekly, Monthly'],
+            width=22
+        )
+        self.sod_period_source_combo.grid(row=3, column=1, sticky="w", padx=5, pady=2)
         # Start/End time pickers (optional)
         time_hours = [str(i).zfill(2) for i in range(1, 13)]
         time_minutes = [str(i).zfill(2) for i in range(60)]
 
-        ttk.Label(sod_input_frame, text="Start Time:").grid(row=3, column=0, sticky="w", padx=5, pady=2)
+        ttk.Label(sod_input_frame, text="Start Time:").grid(row=4, column=0, sticky="w", padx=5, pady=2)
         self.sod_start_hour_var, self.sod_start_minute_var, self.sod_start_ampm_var = tk.StringVar(), tk.StringVar(), tk.StringVar()
         st_frame = ttk.Frame(sod_input_frame)
-        st_frame.grid(row=3, column=1, sticky="w", padx=5, pady=2)
+        st_frame.grid(row=4, column=1, sticky="w", padx=5, pady=2)
         ttk.Combobox(st_frame, textvariable=self.sod_start_hour_var, values=time_hours, width=3, state="readonly").pack(side="left")
         ttk.Combobox(st_frame, textvariable=self.sod_start_minute_var, values=time_minutes, width=3, state="readonly").pack(side="left", padx=(5,0))
         ttk.Combobox(st_frame, textvariable=self.sod_start_ampm_var, values=['AM','PM'], width=3, state="readonly").pack(side="left", padx=(5,0))
 
-        ttk.Label(sod_input_frame, text="End Time:").grid(row=4, column=0, sticky="w", padx=5, pady=2)
+        ttk.Label(sod_input_frame, text="End Time:").grid(row=5, column=0, sticky="w", padx=5, pady=2)
         self.sod_end_hour_var, self.sod_end_minute_var, self.sod_end_ampm_var = tk.StringVar(), tk.StringVar(), tk.StringVar()
         et_frame = ttk.Frame(sod_input_frame)
-        et_frame.grid(row=4, column=1, sticky="w", padx=5, pady=2)
+        et_frame.grid(row=5, column=1, sticky="w", padx=5, pady=2)
         ttk.Combobox(et_frame, textvariable=self.sod_end_hour_var, values=time_hours, width=3, state="readonly").pack(side="left")
         ttk.Combobox(et_frame, textvariable=self.sod_end_minute_var, values=time_minutes, width=3, state="readonly").pack(side="left", padx=(5,0))
         ttk.Combobox(et_frame, textvariable=self.sod_end_ampm_var, values=['AM','PM'], width=3, state="readonly").pack(side="left", padx=(5,0))
 
-        ttk.Label(sod_input_frame, text="Stream:").grid(row=5, column=0, sticky="w", padx=5, pady=2)
+        ttk.Label(sod_input_frame, text="Stream:").grid(row=6, column=0, sticky="w", padx=5, pady=2)
         self.sod_stream_var = tk.StringVar()
-        ttk.Entry(sod_input_frame, textvariable=self.sod_stream_var).grid(row=5, column=1, sticky="ew", padx=5, pady=2)
-        ttk.Button(sod_input_frame, text="Add Task", command=self.add_task).grid(row=6, column=1, pady=10, sticky="w")
+        ttk.Entry(sod_input_frame, textvariable=self.sod_stream_var).grid(row=6, column=1, sticky="ew", padx=5, pady=2)
+        ttk.Button(sod_input_frame, text="Add Task", command=self.add_task).grid(row=7, column=1, pady=10, sticky="w")
 
 
         
@@ -4911,7 +5341,6 @@ class App(BaseWindow):
                 if selected_item_id:
                     self.remove_task(selected_item_id)
     def edit_task(self, event):
-        # Ignore double click on Action column
         if self.sod_tree.identify_column(event.x) == f'#{len(self.sod_display_cols)}':
             return
         selected_item_id = self.sod_tree.focus()
@@ -4920,7 +5349,6 @@ class App(BaseWindow):
         row = self.sod_full_data_storage.get(selected_item_id)
         if not row:
             return
-        # row is (tasklist, stream, frequency, period, start, end, issue, remarks)
         if len(row) == 8:
             tasklist, stream, frequency, _period, start_time, end_time, issue, remarks = row
         else:
@@ -4931,21 +5359,23 @@ class App(BaseWindow):
             end_time = row[4] if len(row) > 4 else ''
             issue = row[5] if len(row) > 5 else ''
             remarks = row[6] if len(row) > 6 else ''
+        period_source = getattr(self, 'sod_period_source_overrides', {}).get(selected_item_id, '')
         edit_window = tk.Toplevel(self)
         edit_window.title('Edit Task')
         ttk.Label(edit_window, text='Tasklist:').pack(padx=10, pady=(10, 0))
         task_entry = ttk.Entry(edit_window, width=60)
         task_entry.pack(padx=10, pady=5)
         task_entry.insert(0, tasklist)
-
         ttk.Label(edit_window, text='Stream:').pack(padx=10, pady=(10, 0))
         stream_var = tk.StringVar(value=stream)
         ttk.Entry(edit_window, width=30, textvariable=stream_var).pack(padx=10, pady=5, anchor='w')
-
         ttk.Label(edit_window, text='Frequency:').pack(padx=10, pady=(10, 0))
         freq_var = tk.StringVar(value=frequency)
         ttk.Combobox(edit_window, textvariable=freq_var, values=['', 'Daily', 'Weekly', 'Monthly', 'Weekly, Monthly']).pack(padx=10, pady=5)
-
+        ttk.Label(edit_window, text='Period:').pack(padx=10, pady=(10, 0))
+        period_source_var = tk.StringVar(value=period_source)
+        ttk.Combobox(edit_window, textvariable=period_source_var,
+                     values=['', 'Daily', 'Weekly', 'Monthly', 'Daily, Weekly', 'Daily, Monthly', 'Weekly, Monthly', 'Daily, Weekly, Monthly']).pack(padx=10, pady=5)
         time_hours = [str(i).zfill(2) for i in range(1, 13)]
         time_minutes = [str(i).zfill(2) for i in range(60)]
         def split_time(t):
@@ -4956,7 +5386,6 @@ class App(BaseWindow):
                 return '', '', ''
         sh, sm, sa = split_time(start_time)
         eh, em, ea = split_time(end_time)
-
         ttk.Label(edit_window, text='Start Time:').pack(padx=10, pady=(10, 0))
         st_frame = ttk.Frame(edit_window)
         st_frame.pack(padx=10, pady=5, anchor='w')
@@ -4964,7 +5393,6 @@ class App(BaseWindow):
         ttk.Combobox(st_frame, textvariable=st_h, values=time_hours, width=3, state='readonly').pack(side='left')
         ttk.Combobox(st_frame, textvariable=st_m, values=time_minutes, width=3, state='readonly').pack(side='left', padx=(5,0))
         ttk.Combobox(st_frame, textvariable=st_a, values=['AM','PM'], width=3, state='readonly').pack(side='left', padx=(5,0))
-
         ttk.Label(edit_window, text='End Time:').pack(padx=10, pady=(10, 0))
         et_frame = ttk.Frame(edit_window)
         et_frame.pack(padx=10, pady=5, anchor='w')
@@ -4972,7 +5400,6 @@ class App(BaseWindow):
         ttk.Combobox(et_frame, textvariable=et_h, values=time_hours, width=3, state='readonly').pack(side='left')
         ttk.Combobox(et_frame, textvariable=et_m, values=time_minutes, width=3, state='readonly').pack(side='left', padx=(5,0))
         ttk.Combobox(et_frame, textvariable=et_a, values=['AM','PM'], width=3, state='readonly').pack(side='left', padx=(5,0))
-
         def save_changes():
             new_task = task_entry.get().strip()
             if not new_task:
@@ -4982,17 +5409,30 @@ class App(BaseWindow):
             new_freq = (freq_var.get() or '').strip()
             _fl2, _fd2 = normalize_frequency_string(new_freq)
             new_freq = _fd2 or new_freq
-            new_period = self.calculate_period(new_freq)
+            _psl, _psd = normalize_period_source_string(period_source_var.get())
+            new_period_source = _psd or ''
+            new_period = self.calculate_period(new_freq, new_period_source)
             new_start = f"{st_h.get()}:{st_m.get()} {st_a.get()}" if (st_h.get() and st_m.get() and st_a.get()) else ''
             new_end = f"{et_h.get()}:{et_m.get()} {et_a.get()}" if (et_h.get() and et_m.get() and et_a.get()) else ''
             self.sod_tree.item(selected_item_id, values=(new_task, new_stream, new_freq, new_period, new_start, new_end, issue, remarks, '❌'))
             self.sod_full_data_storage[selected_item_id] = (new_task, new_stream, new_freq, new_period, new_start, new_end, issue, remarks)
+            try:
+                if new_period_source:
+                    self.sod_period_source_overrides[selected_item_id] = new_period_source
+                else:
+                    self.sod_period_source_overrides.pop(selected_item_id, None)
+            except Exception:
+                pass
             edit_window.destroy()
         ttk.Button(edit_window, text='Save Changes', command=save_changes).pack(pady=10)
 
     def remove_task(self, item_id):
         if item_id in self.sod_full_data_storage:
             del self.sod_full_data_storage[item_id]
+        try:
+            self.sod_period_source_overrides.pop(item_id, None)
+        except Exception:
+            pass
         self.sod_tree.delete(item_id)
 
     # -----------------------------
@@ -5057,11 +5497,13 @@ class App(BaseWindow):
         except Exception:
             pass
 
-    def calculate_period(self, frequency):
+    def calculate_period(self, frequency, period_source=None):
         today = datetime.date.today()
-        # Support multi-frequency input (e.g., 'Weekly, Monthly')
-        freq_list, _freq_display = normalize_frequency_string(frequency)
-        if not freq_list:
+        source_value = period_source if period_source is not None else frequency
+        source_list, _source_display = normalize_period_source_string(source_value)
+        if not source_list:
+            source_list, _source_display = normalize_frequency_string(frequency)
+        if not source_list:
             return ""
 
         def _period_for(single_freq: str) -> str:
@@ -5077,8 +5519,10 @@ class App(BaseWindow):
                     offset_days = int(self.config.get('WEEKLY_START_OFFSET_DAYS', 0))
                 except Exception:
                     offset_days = 0
-                if offset_days < -6: offset_days = -6
-                if offset_days > 6: offset_days = 6
+                if offset_days < -6:
+                    offset_days = -6
+                if offset_days > 6:
+                    offset_days = 6
                 iso_monday = today - datetime.timedelta(days=today.weekday())
                 rollover_date = iso_monday + datetime.timedelta(days=offset_days)
                 active_week_monday = iso_monday if today >= rollover_date else (iso_monday - datetime.timedelta(days=7))
@@ -5096,69 +5540,113 @@ class App(BaseWindow):
                 return f"M{effective_date.month:02d}{effective_date.strftime('%Y')}"
             return ''
 
-        if len(freq_list) == 1:
-            return _period_for(freq_list[0])
-
-        # Multi-frequency: combine period tags in the same order (Weekly then Monthly)
-        periods = [p for p in (_period_for(f) for f in freq_list) if p]
+        if len(source_list) == 1:
+            return _period_for(source_list[0])
+        periods = [p for p in (_period_for(f) for f in source_list) if p]
         return ' | '.join(periods)
 
-    # -----------------------------
-    # SOD ACTIONS
-    # -----------------------------
     def add_task(self, task_values=None):
-        # Fields: tasklist, stream, frequency, period, start_time, end_time, issue, remarks
         start_time = ''
         end_time = ''
         issue = ''
         remarks = 'Not started'
         stream = ''
-        period_override = ''  # preserve period when loading carried-over tasks
+        period_override = ''
+        period_source_override = ''
         if task_values:
+            task_values = list(task_values)
             tasklist = task_values[0] if len(task_values) > 0 else ''
+
             def _looks_like_freq(s):
                 ss = (str(s) if s is not None else '').strip().lower()
-                return ss in ('daily','weekly','monthly') or 'weekly' in ss or 'monthly' in ss or 'daily' in ss
-            # Preset/task_values stream support:
-            # - Old format: [task, freq, ...] -> stream=''
-            # - New format: [task, stream, freq, ...] -> stream=task_values[1]
-            stream = ''
-            try:
-                if len(task_values) > 2 and (not _looks_like_freq(task_values[1])) and _looks_like_freq(task_values[2]):
-                    stream = str(task_values[1] or '').strip()
-            except Exception:
-                stream = ''
+                return ss in ('daily', 'weekly', 'monthly') or 'weekly' in ss or 'monthly' in ss or 'daily' in ss
 
-            # Support old/new preset rows
-            if len(task_values) > 2 and (not _looks_like_freq(task_values[1])) and _looks_like_freq(task_values[2]):
-                frequency = str(task_values[2])
-                base = 3
+            def _looks_like_period(s):
+                cand = str(s or '').strip()
+                if not cand:
+                    return False
+                cand_norm = re.sub(r'\s+', ' ', cand)
+                return bool(re.match(r'^(?:D\d{3}(?:\d{2}|\d{4})|W\d{2}(?:\d{2}|\d{4})|M\d{2}(?:\d{2}|\d{4}))(?:\s*[|/]\s*(?:D\d{3}(?:\d{2}|\d{4})|W\d{2}(?:\d{2}|\d{4})|M\d{2}(?:\d{2}|\d{4})))*$', cand_norm))
+
+            def _looks_like_status_or_remark(s):
+                ss = str(s or '').strip().lower()
+                return ss in ('not started', 'in progress', 'carried over', 'done')
+
+            # Explicit unfinished-task import format:
+            # [tasklist, stream, frequency, period, status, start_time, end_time, issue]
+            # This path is important when a carried-over manual task has a blank frequency.
+            # The previous generic parser only detected a stream if the frequency cell looked
+            # like a frequency token. When frequency was blank, the tuple shifted and the
+            # status landed in the End Time column.
+            if len(task_values) >= 8 and _looks_like_status_or_remark(task_values[4]):
+                stream = str(task_values[1] or '').strip() if len(task_values) > 1 else ''
+                frequency = str(task_values[2] or '').strip() if len(task_values) > 2 else ''
+                _fl, _fd = normalize_frequency_string(frequency)
+                frequency = _fd or frequency
+                cand_period = str(task_values[3] or '').strip() if len(task_values) > 3 else ''
+                if cand_period:
+                    if _looks_like_period(cand_period):
+                        period_override = cand_period
+                    else:
+                        _psl, _psd = normalize_period_source_string(cand_period)
+                        period_source_override = _psd or ''
+                remarks = str(task_values[4] or '').strip() or remarks
+                start_time = str(task_values[5] or '').strip() if len(task_values) > 5 else ''
+                end_time = str(task_values[6] or '').strip() if len(task_values) > 6 else ''
+                issue = str(task_values[7] or '').strip() if len(task_values) > 7 else ''
             else:
-                frequency = str(task_values[1]) if len(task_values) > 1 else ''
-                base = 2
-                # If task_values provides an explicit Period (from prior day/week/month), keep it
+                has_stream = False
+                try:
+                    has_stream = len(task_values) > 2 and (not _looks_like_freq(task_values[1])) and _looks_like_freq(task_values[2])
+                except Exception:
+                    has_stream = False
+
+                if has_stream:
+                    stream = str(task_values[1] or '').strip()
+                    frequency = str(task_values[2] or '').strip()
+                    base = 3
+                else:
+                    frequency = str(task_values[1] or '').strip() if len(task_values) > 1 else ''
+                    base = 2
+
                 try:
                     if len(task_values) > base:
-                        cand = str(task_values[base] or '').strip()
-                        cand_norm = re.sub(r'\s+', ' ', cand)
-                        if re.match(r'^(?:D\d{3}(?:\d{2}|\d{4})|W\d{2}(?:\d{2}|\d{4})|M\d{2}(?:\d{2}|\d{4}))(?:\s+(?:D\d{3}(?:\d{2}|\d{4})|W\d{2}(?:\d{2}|\d{4})|M\d{2}(?:\d{2}|\d{4})))*$', cand_norm):
-                            period_override = cand
+                        cand_source = str(task_values[base] or '').strip()
+                        _psl, source_display = normalize_period_source_string(cand_source)
+                        if source_display:
+                            period_source_override = source_display
                             base += 1
                 except Exception:
                     pass
-            if len(task_values) > base:
-                _r = str(task_values[base] or '').strip()
-                if _r:
-                    remarks = _r
-            if len(task_values) > base+1:
-                start_time = str(task_values[base+1] or '').strip()
-            if len(task_values) > base+2:
-                end_time = str(task_values[base+2] or '').strip()
-            if len(task_values) > base+3:
-                issue = str(task_values[base+3] or '').strip()
+
+                try:
+                    if len(task_values) > base:
+                        cand = str(task_values[base] or '').strip()
+                        if _looks_like_period(cand):
+                            period_override = cand
+                            base += 1
+                        elif cand == '' and len(task_values) > base + 1 and _looks_like_status_or_remark(task_values[base + 1]):
+                            period_override = ''
+                            base += 1
+                except Exception:
+                    pass
+
+                if len(task_values) > base:
+                    _r = str(task_values[base] or '').strip()
+                    if _r:
+                        remarks = _r
+                if len(task_values) > base + 1:
+                    start_time = str(task_values[base + 1] or '').strip()
+                if len(task_values) > base + 2:
+                    end_time = str(task_values[base + 2] or '').strip()
+                if len(task_values) > base + 3:
+                    issue = str(task_values[base + 3] or '').strip()
         else:
             tasklist = self.tasklist_entry.get().strip()
             frequency = self.frequency_var.get().strip()
+            period_source_override = (getattr(self, 'sod_period_source_var', tk.StringVar()).get() or '').strip()
+            _psl, _psd = normalize_period_source_string(period_source_override)
+            period_source_override = _psd or ''
             stream = (getattr(self, 'sod_stream_var', tk.StringVar()).get() or '').strip()
             _fl, _fd = normalize_frequency_string(frequency)
             frequency = _fd or frequency
@@ -5171,21 +5659,33 @@ class App(BaseWindow):
         if not tasklist:
             messagebox.showwarning('Warning', 'Tasklist field cannot be empty.')
             return
-        period = period_override if str(period_override).strip() != "" else self.calculate_period(frequency)
+        period = period_override if str(period_override).strip() != '' else self.calculate_period(frequency, period_source_override)
         display_values = (tasklist, stream, frequency, period, start_time, end_time, issue, remarks, '❌')
         full_data_values = (tasklist, stream, frequency, period, start_time, end_time, issue, remarks)
         item_id = self.sod_tree.insert('', tk.END, values=display_values)
         self.sod_full_data_storage[item_id] = full_data_values
+        try:
+            if period_source_override:
+                self.sod_period_source_overrides[item_id] = period_source_override
+            else:
+                self.sod_period_source_overrides.pop(item_id, None)
+        except Exception:
+            pass
         if not task_values:
             self.tasklist_entry.delete(0, tk.END)
             self.frequency_combo.set('')
             self.task_helper_combo.set('')
+            try:
+                self.sod_period_source_combo.set('')
+            except Exception:
+                pass
             self.sod_start_hour_var.set(''); self.sod_start_minute_var.set(''); self.sod_start_ampm_var.set('')
             self.sod_end_hour_var.set(''); self.sod_end_minute_var.set(''); self.sod_end_ampm_var.set('')
             try:
                 self.sod_stream_var.set('')
             except Exception:
                 pass
+
     def load_preset_tasks(self):
         today = datetime.date.today()
         today_name = today.strftime('%A')
@@ -5315,16 +5815,16 @@ class App(BaseWindow):
                     if item in ("🔄 In Progress", "➡️ Carried Over"):
                         detected_status = item
                         break
-                if detected_status == "🔄 In Progress":
+                if detected_status in ("🔄 In Progress", "➡️ Carried Over"):
                     tasklist = task_row[3] if len(task_row) > 3 else (task_row[0] if task_row else "")
+                    stream = task_row[2] if len(task_row) > 2 else ''
                     freq = task_row[5] if len(task_row) > 5 else ""
                     period = task_row[6] if len(task_row) > 6 else ''
-                    unfinished_tasks.append((tasklist, freq, period, "In Progress"))
-                elif detected_status == "➡️ Carried Over":
-                    tasklist = task_row[3] if len(task_row) > 3 else (task_row[0] if task_row else "")
-                    freq = task_row[5] if len(task_row) > 5 else ""
-                    period = task_row[6] if len(task_row) > 6 else ''
-                    unfinished_tasks.append((tasklist, freq, period, "Carried Over"))
+                    start_time = task_row[7] if len(task_row) > 7 else ''
+                    end_time = task_row[8] if len(task_row) > 8 else ''
+                    issue = task_row[9] if len(task_row) > 9 else ''
+                    status_text = "In Progress" if detected_status == "🔄 In Progress" else "Carried Over"
+                    unfinished_tasks.append((tasklist, stream, freq, period, status_text, start_time, end_time, issue))
             if not unfinished_tasks:
                 messagebox.showinfo("All Clear!", "No unfinished tasks found from your last report.")
                 return
@@ -5952,27 +6452,38 @@ class App(BaseWindow):
             width=15
         )
         self.preset_frequency_combo.grid(row=2, column=1, sticky="w", padx=5, pady=2)
+        self.preset_period_source_label = ttk.Label(preset_input_frame, text="Period:")
+        self.preset_period_source_label.grid(row=3, column=0, sticky="w", padx=5, pady=2)
+
+        self.preset_period_source_var = tk.StringVar()
+        self.preset_period_source_combo = ttk.Combobox(
+            preset_input_frame,
+            textvariable=self.preset_period_source_var,
+            values=['', 'Daily', 'Weekly', 'Monthly', 'Daily, Weekly', 'Daily, Monthly', 'Weekly, Monthly', 'Daily, Weekly, Monthly'],
+            width=22
+        )
+        self.preset_period_source_combo.grid(row=3, column=1, sticky="w", padx=5, pady=2)
         # Start/End time pickers for presets
         time_hours = [str(i).zfill(2) for i in range(1, 13)]
         time_minutes = [str(i).zfill(2) for i in range(60)]
 
-        ttk.Label(preset_input_frame, text="Start Time:").grid(row=3, column=0, sticky="w", padx=5, pady=2)
+        ttk.Label(preset_input_frame, text="Start Time:").grid(row=4, column=0, sticky="w", padx=5, pady=2)
         self.preset_start_hour_var, self.preset_start_minute_var, self.preset_start_ampm_var = tk.StringVar(), tk.StringVar(), tk.StringVar()
         pst = ttk.Frame(preset_input_frame)
-        pst.grid(row=3, column=1, sticky="w", padx=5, pady=2)
+        pst.grid(row=4, column=1, sticky="w", padx=5, pady=2)
         ttk.Combobox(pst, textvariable=self.preset_start_hour_var, values=time_hours, width=3, state="readonly").pack(side="left")
         ttk.Combobox(pst, textvariable=self.preset_start_minute_var, values=time_minutes, width=3, state="readonly").pack(side="left", padx=(5,0))
         ttk.Combobox(pst, textvariable=self.preset_start_ampm_var, values=['AM','PM'], width=3, state="readonly").pack(side="left", padx=(5,0))
 
-        ttk.Label(preset_input_frame, text="End Time:").grid(row=4, column=0, sticky="w", padx=5, pady=2)
+        ttk.Label(preset_input_frame, text="End Time:").grid(row=5, column=0, sticky="w", padx=5, pady=2)
         self.preset_end_hour_var, self.preset_end_minute_var, self.preset_end_ampm_var = tk.StringVar(), tk.StringVar(), tk.StringVar()
         pet = ttk.Frame(preset_input_frame)
-        pet.grid(row=4, column=1, sticky="w", padx=5, pady=2)
+        pet.grid(row=5, column=1, sticky="w", padx=5, pady=2)
         ttk.Combobox(pet, textvariable=self.preset_end_hour_var, values=time_hours, width=3, state="readonly").pack(side="left")
         ttk.Combobox(pet, textvariable=self.preset_end_minute_var, values=time_minutes, width=3, state="readonly").pack(side="left", padx=(5,0))
         ttk.Combobox(pet, textvariable=self.preset_end_ampm_var, values=['AM','PM'], width=3, state="readonly").pack(side="left", padx=(5,0))
 
-        ttk.Button(preset_input_frame, text="Add/Update", command=self.add_preset_task_to_preset_editor).grid(row=5, column=1, pady=10, sticky="w")
+        ttk.Button(preset_input_frame, text="Add/Update", command=self.add_preset_task_to_preset_editor).grid(row=6, column=1, pady=10, sticky="w")
 
 
         
@@ -5982,14 +6493,16 @@ class App(BaseWindow):
         self.preset_editor_frame.rowconfigure(1, weight=1)
         self.preset_editor_frame.columnconfigure(0, weight=1)
 
-        self.preset_display_cols = ["Tasklist", "Stream", "Frequency", "Start Time", "End Time", "Action"]
+        self.preset_display_cols = ["Tasklist", "Stream", "Frequency", "Period", "Start Time", "End Time", "Action"]
         self.preset_tree = ttk.Treeview(preset_list_frame, columns=self.preset_display_cols, show='headings')
         self.preset_tree.heading('Tasklist', text='Tasklist')
         self.preset_tree.column('Tasklist', width=320)
         self.preset_tree.heading('Stream', text='Stream')
         self.preset_tree.column('Stream', width=90, minwidth=60, anchor='w', stretch=True)
         self.preset_tree.heading('Frequency', text='Frequency')
-        self.preset_tree.column('Frequency', width=150)
+        self.preset_tree.column('Frequency', width=120)
+        self.preset_tree.heading('Period', text='Period')
+        self.preset_tree.column('Period', width=140)
         self.preset_tree.heading('Start Time', text='Start Time')
         self.preset_tree.column('Start Time', width=90)
         self.preset_tree.heading('End Time', text='End Time')
@@ -6011,18 +6524,20 @@ class App(BaseWindow):
     def on_preset_type_change(self, event=None):
         preset_type = self.preset_type_var.get()
 
-        # Frequency is automatic for Daily/Weekday/Monthly presets.
-        # Frequency is configurable for Task Dropdown Options.
-        # Frequency field behavior:
-        # - Daily presets: frequency is forced to Daily (hide field)
-        # - Weekday/Monthly presets: allow selecting Weekly/Monthly/Weekly, Monthly
-        # - Task Dropdown Options: allow selecting any supported frequency
-        if preset_type in ("Weekday", "Monthly", "Task Dropdown Options"):
+        if preset_type in ("Daily", "Weekday", "Monthly", "Task Dropdown Options"):
             self.preset_freq_label.grid()
             self.preset_frequency_combo.grid()
         else:
             self.preset_freq_label.grid_remove()
             self.preset_frequency_combo.grid_remove()
+
+        if preset_type in ("Daily", "Weekday", "Monthly"):
+            self.preset_period_source_label.grid()
+            self.preset_period_source_combo.grid()
+        else:
+            self.preset_period_source_label.grid_remove()
+            self.preset_period_source_combo.grid_remove()
+
         if preset_type == "Daily":
             self.preset_key_var.set("")
             self.preset_key_combo.config(state="disabled", values=[])
@@ -6062,46 +6577,43 @@ class App(BaseWindow):
             tasks = self.presets.get("Monthly", {}).get(key, [])
         elif preset_type == "Task Dropdown Options":
             self.preset_editor_frame.config(text="Editing Task Dropdown Options")
-            # TaskDropdown supports per-task frequency (backward compatible with older string-only lists)
             self._normalize_taskdropdown_items()
             tasks = self.presets.get("TaskDropdown", [])
 
         self.preset_editor_frame.pack(fill="both", expand=True, padx=10, pady=10)
-
         self.preset_tree.delete(*self.preset_tree.get_children())
+
         for task_values in tasks:
-            # Enforce automatic frequency for Daily/Weekday/Monthly presets
-            try:
-                ptype = self.preset_type_var.get()
-                forced_freq = None
-                # Only Daily presets force frequency; Weekday/Monthly can be mixed
-                if ptype == 'Daily':
-                    forced_freq = 'Daily'
-                if forced_freq is not None:
-                    if isinstance(task_values, (list, tuple)) and len(task_values) >= 1:
-                        task_values = [task_values[0], forced_freq]
-                    elif isinstance(task_values, str):
-                        task_values = [task_values, forced_freq]
-            except Exception:
-                pass
-            if isinstance(task_values, list) and len(task_values) >= 2:
-                st = task_values[3] if len(task_values) > 3 else ''
-                et = task_values[4] if len(task_values) > 4 else ''
-                # task_values can be old: [task, freq, '', st, et] or new: [task, stream, freq, '', st, et]
-                def _is_freq(x):
-                    s = (str(x) if x is not None else '').strip().lower()
-                    return s in ('daily','weekly','monthly') or 'weekly' in s or 'monthly' in s or 'daily' in s
-                if len(task_values) > 1 and _is_freq(task_values[1]):
-                    _stream = ''
-                    _freq = task_values[1]
-                    st = task_values[3] if len(task_values) > 3 else ''
-                    et = task_values[4] if len(task_values) > 4 else ''
+            tasklist = ''
+            stream = ''
+            frequency = ''
+            period_source = ''
+            start_time = ''
+            end_time = ''
+            if isinstance(task_values, str):
+                tasklist = task_values
+            elif isinstance(task_values, (list, tuple)):
+                row = list(task_values)
+                tasklist = str(row[0] or '') if len(row) > 0 else ''
+                if preset_type == "Task Dropdown Options":
+                    frequency = str(row[1] or '') if len(row) > 1 else ''
                 else:
-                    _stream = task_values[1] if len(task_values) > 1 else ''
-                    _freq = task_values[2] if len(task_values) > 2 else ''
-                    st = task_values[4] if len(task_values) > 4 else ''
-                    et = task_values[5] if len(task_values) > 5 else ''
-                self.preset_tree.insert('', tk.END, values=(task_values[0], _stream, _freq, st, et, '❌'))
+                    stream = str(row[1] or '') if len(row) > 1 else ''
+                    frequency = str(row[2] or '') if len(row) > 2 else ''
+                    candidate = str(row[3] or '') if len(row) > 3 else ''
+                    _psl, source_display = normalize_period_source_string(candidate)
+                    if candidate and source_display:
+                        period_source = source_display
+                        start_time = str(row[4] or '') if len(row) > 4 else ''
+                        end_time = str(row[5] or '') if len(row) > 5 else ''
+                    else:
+                        start_time = str(row[3] or '') if len(row) > 3 else ''
+                        end_time = str(row[4] or '') if len(row) > 4 else ''
+            _fl, _fd = normalize_frequency_string(frequency)
+            frequency = _fd or frequency
+            _psl, _psd = normalize_period_source_string(period_source)
+            period_source = _psd or ''
+            self.preset_tree.insert('', tk.END, values=(tasklist, stream, frequency, period_source, start_time, end_time, '❌'))
 
     def handle_preset_tree_click(self, event):
         if self.preset_tree.identify_region(event.x, event.y) == "cell":
@@ -6112,36 +6624,23 @@ class App(BaseWindow):
     def add_preset_task_to_preset_editor(self):
         tasklist = self.preset_tasklist_entry.get().strip()
         preset_type = self.preset_type_var.get()
-
-        # Frequency rules for presets:
-        # - Daily preset forces 'Daily'
-        # - Weekday/Monthly presets allow selecting Weekly/Monthly/Weekly, Monthly
-        # - Task Dropdown Options allow selecting any supported frequency
-        if preset_type == 'Daily':
-            frequency = 'Daily'
-        else:
-            frequency = self.preset_frequency_var.get().strip()
-            _fl, _fd = normalize_frequency_string(frequency)
-            frequency = _fd or frequency
-            # sensible defaults if blank
-            if not frequency and preset_type == 'Weekday':
-                frequency = 'Weekly'
-            if not frequency and preset_type == 'Monthly':
-                frequency = 'Monthly'
-
+        frequency = self.preset_frequency_var.get().strip()
+        _fl, _fd = normalize_frequency_string(frequency)
+        frequency = _fd or frequency
+        period_source = ''
+        if preset_type in ('Daily', 'Weekday', 'Monthly'):
+            period_source = self.preset_period_source_var.get().strip()
+            _psl, _psd = normalize_period_source_string(period_source)
+            period_source = _psd or ''
         if not tasklist:
             messagebox.showwarning('Warning', 'Tasklist field cannot be empty.')
             return
-
-        # Build start/end strings
         sh, sm, sa = self.preset_start_hour_var.get(), self.preset_start_minute_var.get(), self.preset_start_ampm_var.get()
         eh, em, ea = self.preset_end_hour_var.get(), self.preset_end_minute_var.get(), self.preset_end_ampm_var.get()
         start_time = f"{sh}:{sm} {sa}" if (sh and sm and sa) else ''
         end_time = f"{eh}:{em} {ea}" if (eh and em and ea) else ''
-
         stream = (getattr(self, 'preset_stream_var', tk.StringVar()).get() or '').strip()
-        self.preset_tree.insert('', tk.END, values=(tasklist, stream, frequency, start_time, end_time, '❌'))
-
+        self.preset_tree.insert('', tk.END, values=(tasklist, stream, frequency, period_source, start_time, end_time, '❌'))
         self.preset_tasklist_entry.delete(0, tk.END)
         try:
             self.preset_stream_var.set('')
@@ -6149,101 +6648,94 @@ class App(BaseWindow):
             pass
         self.preset_frequency_combo.set('')
         try:
+            self.preset_period_source_combo.set('')
+        except Exception:
+            pass
+        try:
             self.preset_start_hour_var.set(''); self.preset_start_minute_var.set(''); self.preset_start_ampm_var.set('')
             self.preset_end_hour_var.set(''); self.preset_end_minute_var.set(''); self.preset_end_ampm_var.set('')
         except Exception:
             pass
 
     def edit_preset_task(self, event):
-        # Action column is the last column (❌)
         if self.preset_tree.identify_column(event.x) == f'#{len(self.preset_display_cols)}':
             return
-
         selected_item_id = self.preset_tree.focus()
         if not selected_item_id:
             return
-
         edit_window = tk.Toplevel(self)
         edit_window.title("Edit Preset Task")
-
         values = list(self.preset_tree.item(selected_item_id, 'values'))
         tasklist = values[0] if len(values) > 0 else ''
         stream_val = values[1] if len(values) > 1 else ''
         frequency = values[2] if len(values) > 2 else ''
-        start_time = values[3] if len(values) > 2 else ''
-        end_time = values[4] if len(values) > 3 else ''
-
+        period_source = values[3] if len(values) > 3 else ''
+        start_time = values[4] if len(values) > 4 else ''
+        end_time = values[5] if len(values) > 5 else ''
         ttk.Label(edit_window, text="Tasklist:").pack(padx=10, pady=(10, 0))
         task_entry = ttk.Entry(edit_window, width=60)
         task_entry.pack(padx=10, pady=5)
         task_entry.insert(0, tasklist)
-
         ttk.Label(edit_window, text='Stream:').pack(padx=10, pady=(10, 0))
         stream_var = tk.StringVar(value=stream_val)
         ttk.Entry(edit_window, width=30, textvariable=stream_var).pack(padx=10, pady=5, anchor='w')
-
         preset_type = self.preset_type_var.get()
         is_freq_editable = preset_type in ("Weekday", "Monthly", "Task Dropdown Options")
-
-        forced_freq = None
-        # Only Daily presets force frequency; Weekday/Monthly can be mixed
-        if preset_type == 'Daily':
-            forced_freq = 'Daily'
+        forced_freq = 'Daily' if preset_type == 'Daily' else None
         freq_var = tk.StringVar(value=(forced_freq if forced_freq is not None else frequency))
         if is_freq_editable:
             ttk.Label(edit_window, text="Frequency:").pack(padx=10, pady=(10, 0))
             ttk.Combobox(edit_window, textvariable=freq_var, values=['', 'Daily', 'Weekly', 'Monthly', 'Weekly, Monthly']).pack(padx=10, pady=5)
-
+        period_source_var = tk.StringVar(value=period_source)
+        if preset_type in ('Daily', 'Weekday', 'Monthly'):
+            ttk.Label(edit_window, text="Period:").pack(padx=10, pady=(10, 0))
+            ttk.Combobox(edit_window, textvariable=period_source_var, values=['', 'Daily', 'Weekly', 'Monthly', 'Daily, Weekly', 'Daily, Monthly', 'Weekly, Monthly', 'Daily, Weekly, Monthly']).pack(padx=10, pady=5)
         time_hours = [str(i).zfill(2) for i in range(1, 13)]
         time_minutes = [str(i).zfill(2) for i in range(60)]
-
         def split_time(t):
             try:
                 dt = datetime.datetime.strptime(str(t).strip(), '%I:%M %p')
                 return dt.strftime('%I'), dt.strftime('%M'), dt.strftime('%p')
             except Exception:
                 return '', '', ''
-
         sh, sm, sa = split_time(start_time)
         eh, em, ea = split_time(end_time)
-
-        ttk.Label(edit_window, text="Start Time:").pack(padx=10, pady=(10, 0))
+        ttk.Label(edit_window, text='Start Time:').pack(padx=10, pady=(10, 0))
         st_frame = ttk.Frame(edit_window)
         st_frame.pack(padx=10, pady=5, anchor='w')
-        st_h = tk.StringVar(value=sh)
-        st_m = tk.StringVar(value=sm)
-        st_a = tk.StringVar(value=sa)
+        st_h = tk.StringVar(value=sh); st_m = tk.StringVar(value=sm); st_a = tk.StringVar(value=sa)
         ttk.Combobox(st_frame, textvariable=st_h, values=time_hours, width=3, state='readonly').pack(side='left')
-        ttk.Combobox(st_frame, textvariable=st_m, values=time_minutes, width=3, state='readonly').pack(side='left', padx=(5, 0))
-        ttk.Combobox(st_frame, textvariable=st_a, values=['AM', 'PM'], width=3, state='readonly').pack(side='left', padx=(5, 0))
-
-        ttk.Label(edit_window, text="End Time:").pack(padx=10, pady=(10, 0))
+        ttk.Combobox(st_frame, textvariable=st_m, values=time_minutes, width=3, state='readonly').pack(side='left', padx=(5,0))
+        ttk.Combobox(st_frame, textvariable=st_a, values=['AM','PM'], width=3, state='readonly').pack(side='left', padx=(5,0))
+        ttk.Label(edit_window, text='End Time:').pack(padx=10, pady=(10, 0))
         et_frame = ttk.Frame(edit_window)
         et_frame.pack(padx=10, pady=5, anchor='w')
-        et_h = tk.StringVar(value=eh)
-        et_m = tk.StringVar(value=em)
-        et_a = tk.StringVar(value=ea)
+        et_h = tk.StringVar(value=eh); et_m = tk.StringVar(value=em); et_a = tk.StringVar(value=ea)
         ttk.Combobox(et_frame, textvariable=et_h, values=time_hours, width=3, state='readonly').pack(side='left')
-        ttk.Combobox(et_frame, textvariable=et_m, values=time_minutes, width=3, state='readonly').pack(side='left', padx=(5, 0))
-        ttk.Combobox(et_frame, textvariable=et_a, values=['AM', 'PM'], width=3, state='readonly').pack(side='left', padx=(5, 0))
-
+        ttk.Combobox(et_frame, textvariable=et_m, values=time_minutes, width=3, state='readonly').pack(side='left', padx=(5,0))
+        ttk.Combobox(et_frame, textvariable=et_a, values=['AM','PM'], width=3, state='readonly').pack(side='left', padx=(5,0))
         def save_changes():
             new_task = task_entry.get().strip()
-            new_stream = (stream_var.get() if 'stream_var' in locals() else '').strip()
             if not new_task:
                 messagebox.showwarning('Warning', 'Tasklist field cannot be empty.')
                 return
-
-            new_freq = forced_freq if forced_freq is not None else freq_var.get().strip()
+            new_stream = (stream_var.get() or '').strip()
+            new_freq = 'Daily' if preset_type == 'Daily' else (freq_var.get() or '').strip()
+            _fl, _fd = normalize_frequency_string(new_freq)
+            new_freq = _fd or new_freq
+            if not new_freq and preset_type == 'Weekday':
+                new_freq = 'Weekly'
+            if not new_freq and preset_type == 'Monthly':
+                new_freq = 'Monthly'
+            new_period_source = ''
+            if preset_type in ('Daily', 'Weekday', 'Monthly'):
+                _psl, _psd = normalize_period_source_string(period_source_var.get())
+                new_period_source = _psd or ''
             new_start = f"{st_h.get()}:{st_m.get()} {st_a.get()}" if (st_h.get() and st_m.get() and st_a.get()) else ''
             new_end = f"{et_h.get()}:{et_m.get()} {et_a.get()}" if (et_h.get() and et_m.get() and et_a.get()) else ''
-
-            self.preset_tree.item(selected_item_id, values=(new_task, new_stream, new_freq, new_start, new_end, '❌'))
+            self.preset_tree.item(selected_item_id, values=(new_task, new_stream, new_freq, new_period_source, new_start, new_end, '❌'))
             edit_window.destroy()
-
-        ttk.Button(edit_window, text="Save Changes", command=save_changes).pack(pady=10)
-
-
+        ttk.Button(edit_window, text='Save Changes', command=save_changes).pack(pady=10)
 
 # --- Main Execution ---
 if __name__ == "__main__":
